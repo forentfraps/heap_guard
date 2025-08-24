@@ -8,7 +8,7 @@ const W = std.unicode.utf8ToUtf16LeStringLiteral;
 const Aes256 = std.crypto.core.aes.Aes256;
 const AesEnc = std.crypto.core.aes.AesEncryptCtx(Aes256);
 
-const tSetEvent = *const fn (win.HANDLE) callconv(.C) win.BOOL;
+const tSetEvent = *const fn (win.HANDLE) callconv(.c) win.BOOL;
 var pSetEvent: ?tSetEvent = null;
 
 pub const GuardedEncAllocator = struct {
@@ -309,7 +309,7 @@ pub const GuardedEncAllocator = struct {
         }
     };
 
-    fn vehThunk(rec: *win.EXCEPTION_POINTERS) callconv(.C) win.LONG {
+    fn vehThunk(rec: *win.EXCEPTION_POINTERS) callconv(.c) win.LONG {
         const opt = VEH_STATE.get();
         if (opt == null) return 0;
 
@@ -420,7 +420,7 @@ pub const GuardedEncAllocator = struct {
                 }
                 // On both signal and timeout we drop to the scan below.
             } else {
-                std.time.sleep(@as(u64, wait_ms) * std.time.ns_per_ms);
+                std.Thread.sleep(@as(u64, wait_ms) * std.time.ns_per_ms);
             }
             self.reencryptScan();
         }
