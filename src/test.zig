@@ -25,7 +25,7 @@ fn waitUntilNoAccess(p: [*]const u8, timeout_ms: u32) !void {
         const prot = try protAt(p);
         if (prot == win.PAGE_NOACCESS) return;
         if (std.time.milliTimestamp() - start > timeout_ms) return error.Timeout;
-        std.time.sleep(2 * std.time.ns_per_ms);
+        std.Thread.sleep(2 * std.time.ns_per_ms);
     }
 }
 
@@ -88,7 +88,7 @@ test "GEA: per-page lazy decrypt across 8 pages" {
         try std.testing.expectEqual(win.PAGE_READWRITE, try protAt(page_probe));
     }
 
-    std.time.sleep(200 * std.time.ns_per_ms);
+    std.Thread.sleep(200 * std.time.ns_per_ms);
 
     i = 0;
     while (i < pages) : (i += 1) {
@@ -123,7 +123,7 @@ test "GEA: parent allocator mode still guards" {
     try std.testing.expectEqual(@as(u8, 0xAB), buf[17]);
     try std.testing.expectEqual(win.PAGE_READWRITE, try protAt(@as([*]const u8, @ptrCast(buf.ptr))));
 
-    std.time.sleep(200 * std.time.ns_per_ms);
+    std.Thread.sleep(200 * std.time.ns_per_ms);
     try waitUntilNoAccess(@as([*]const u8, @ptrCast(buf.ptr)), 1000);
 
     try std.testing.expectEqual(@as(u8, 0xAB), buf[17]);
@@ -228,7 +228,7 @@ test "GEA: concurrent access from multiple threads" {
             while (iter < 2000) : (iter += 1) {
                 p[off] = v;
                 if (p[off] != v) return error.Corruption;
-                std.time.sleep(50_000);
+                std.Thread.sleep(50_000);
                 v +%= 1;
             }
         }
@@ -250,7 +250,7 @@ test "GEA: concurrent access from multiple threads" {
         const off = i * enc.page_size;
         buf[off] = 0xEE;
         try std.testing.expectEqual(@as(u8, 0xEE), buf[off]);
-        std.time.sleep(200_000);
+        std.Thread.sleep(200_000);
     }
 
     var j: usize = 0;
@@ -283,7 +283,7 @@ test "GEA: stress - many mixed allocations + patterns + frees" {
         while (k < sz) : (k += step) bufs[i][k] = @intCast((i * 17 + k) & 0xff);
     }
 
-    std.time.sleep(100 * std.time.ns_per_ms);
+    std.Thread.sleep(100 * std.time.ns_per_ms);
 
     // verify random spots, then free half
     i = 0;
