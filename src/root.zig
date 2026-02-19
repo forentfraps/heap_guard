@@ -2,6 +2,92 @@ const std = @import("std");
 const builtin = @import("builtin");
 const mem = std.mem;
 const win = std.os.windows;
+pub extern "kernel32" fn GetModuleHandleW(
+    lpModuleName: [*:0]const win.WCHAR,
+) callconv(.winapi) ?win.HMODULE;
+pub extern "kernel32" fn GetProcAddress(
+    module: win.HMODULE,
+    procName: [*:0]const u8,
+) callconv(.winapi) ?win.FARPROC;
+extern "kernel32" fn AddVectoredExceptionHandler(
+    First: std.os.windows.ULONG,
+    Handler: ?*const fn (ExceptionInfo: *std.os.windows.EXCEPTION_POINTERS) callconv(.winapi) std.os.windows.LONG,
+) callconv(.winapi) ?std.os.windows.PVOID;
+extern "kernel32" fn CreateEventExW(
+    lpEventAttributes: ?*std.os.windows.SECURITY_ATTRIBUTES,
+    lpName: ?std.os.windows.LPCWSTR,
+    dwFlags: std.os.windows.DWORD,
+    dwDesiredAccess: std.os.windows.DWORD,
+) callconv(.winapi) ?std.os.windows.HANDLE;
+extern "kernel32" fn VirtualProtect(
+    lpAddress: std.os.windows.LPVOID,
+    dwSize: std.os.windows.SIZE_T,
+    flNewProtect: std.os.windows.DWORD,
+    lpflOldProtect: *std.os.windows.DWORD,
+) callconv(.winapi) std.os.windows.BOOL;
+extern "kernel32" fn VirtualFree(
+    lpAddress: std.os.windows.LPVOID,
+    dwSize: std.os.windows.SIZE_T,
+    dwFreeType: std.os.windows.DWORD,
+) callconv(.winapi) std.os.windows.BOOL;
+extern "kernel32" fn VirtualAlloc(
+    lpAddress: ?std.os.windows.LPVOID,
+    dwSize: std.os.windows.SIZE_T,
+    flAllocationType: std.os.windows.DWORD,
+    flProtect: std.os.windows.DWORD,
+) callconv(.winapi) ?std.os.windows.LPVOID;
+extern "kernel32" fn Sleep(
+    dwMilliseconds: std.os.windows.DWORD,
+) callconv(.winapi) void;
+extern "kernel32" fn RemoveVectoredExceptionHandler(
+    Handle: std.os.windows.PVOID,
+) callconv(.winapi) std.os.windows.ULONG;
+extern "kernel32" fn WaitForSingleObject(
+    hHandle: std.os.windows.HANDLE,
+    dwMilliseconds: std.os.windows.DWORD,
+) callconv(.winapi) std.os.windows.DWORD;
+const WAIT_OBJECT_0: std.os.windows.DWORD = 0x00000000;
+const WAIT_TIMEOUT: std.os.windows.DWORD = 0x00000102;
+const GENERIC_WRITE: u32 = 0x40000000;
+const GENERIC_READ: u32 = 0x80000000;
+const FILE_SHARE_READ: u32 = 0x00000001;
+const FILE_SHARE_WRITE: u32 = 0x00000002;
+const OPEN_EXISTING: u32 = 3;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x00000080;
+const MEM_RESERVE: u32 = 0x00002000;
+const MEM_RELEASE: std.os.windows.DWORD = 0x00008000;
+const MEM_COMMIT: u32 = 0x00001000;
+const EVENT_ALL_ACCESS: std.os.windows.DWORD = 0x001F0003;
+const PAGE_NOACCESS: u32 = 0x01;
+const PAGE_READONLY: u32 = 0x02;
+const PAGE_READWRITE: u32 = 0x04;
+const PAGE_WRITECOPY: u32 = 0x08;
+const PAGE_EXECUTE: u32 = 0x10;
+const PAGE_EXECUTE_READ: u32 = 0x20;
+const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+const PAGE_EXECUTE_WRITECOPY: u32 = 0x80;
+
+// Modifiers (OR with above)
+const PAGE_GUARD: u32 = 0x100;
+const PAGE_NOCACHE: u32 = 0x200;
+const PAGE_WRITECOMBINE: u32 = 0x400;
+
+const MEMORY_BASIC_INFORMATION = extern struct {
+    BaseAddress: std.os.windows.PVOID,
+    AllocationBase: std.os.windows.PVOID,
+    AllocationProtect: std.os.windows.DWORD,
+    PartitionId: std.os.windows.WORD,
+    RegionSize: std.os.windows.SIZE_T,
+    State: std.os.windows.DWORD,
+    Protect: std.os.windows.DWORD,
+    Type: std.os.windows.DWORD,
+};
+
+extern "kernel32" fn VirtualQuery(
+    lpAddress: ?std.os.windows.LPCVOID,
+    lpBuffer: *MEMORY_BASIC_INFORMATION,
+    dwLength: std.os.windows.SIZE_T,
+) callconv(.winapi) std.os.windows.SIZE_T;
 
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
 
@@ -23,7 +109,8 @@ pub const GuardedEncAllocator = struct {
     parent: ?std.mem.Allocator = null,
 
     // Global state
-    mu: std.Thread.Mutex = .{},
+    io: std.Io = undefined,
+    mu: std.Io.Mutex = .{ .state = .{ .raw = .unlocked } },
     regions: std.AutoHashMap(*align(4096) u8, *Region),
     page_size: usize,
 
@@ -93,10 +180,10 @@ pub const GuardedEncAllocator = struct {
         _ = ret_addr;
         return null; // signal "cannot remap"
     }
-    pub fn init(allocator: std.mem.Allocator, use_parent: bool, parent_opt: ?std.mem.Allocator) !*Self {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, use_parent: bool, parent_opt: ?std.mem.Allocator) !*Self {
         if (pSetEvent == null) {
-            const kernel32: win.HMODULE = win.kernel32.GetModuleHandleW(W("kernel32.dll")) orelse unreachable;
-            const fSetEvent: tSetEvent = @ptrCast(win.kernel32.GetProcAddress(kernel32, "SetEvent") orelse unreachable);
+            const kernel32: win.HMODULE = GetModuleHandleW(W("kernel32.dll")) orelse unreachable;
+            const fSetEvent: tSetEvent = @ptrCast(GetProcAddress(kernel32, "SetEvent") orelse unreachable);
             pSetEvent = fSetEvent;
         }
 
@@ -104,10 +191,10 @@ pub const GuardedEncAllocator = struct {
             return error.MissingParent;
 
         var key: [32]u8 = undefined;
-        std.crypto.random.bytes(@as([*]u8, @ptrCast(&key))[0..32]);
+        std.Io.random(io, @as([*]u8, @ptrCast(&key))[0..32]);
 
         var salt: [8]u8 = undefined;
-        std.crypto.random.bytes(&salt);
+        std.Io.random(io, &salt);
 
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
@@ -125,11 +212,11 @@ pub const GuardedEncAllocator = struct {
             .decrypt_timeout_ms = 750,
             .use_parent = use_parent,
             .parent = parent_opt,
-            .mu = .{},
             .regions = std.AutoHashMap(*align(4096) u8, *Region).init(allocator),
             .page_size = std.heap.page_size_min,
             .enc = Aes256.initEnc(key),
             .salt = salt,
+            .io = io,
             .recrypt_thread = null,
             .wake_event = null,
             .quit = false,
@@ -141,7 +228,7 @@ pub const GuardedEncAllocator = struct {
 
         try self.installVeh();
 
-        self.wake_event = try win.CreateEventExW(null, null, 0, win.EVENT_ALL_ACCESS);
+        self.wake_event = CreateEventExW(null, null, 0, EVENT_ALL_ACCESS);
         if (self.wake_event == null) return error.WinCreateEvent;
 
         self.recrypt_thread = try std.Thread.spawn(.{}, recryptWorker, .{self});
@@ -151,10 +238,10 @@ pub const GuardedEncAllocator = struct {
 
     pub fn deinit(self: *Self) void {
         // stop worker
-        self.mu.lock();
+        self.mu.lock(self.io) catch unreachable;
         self.quit = true;
         const evt = self.wake_event;
-        self.mu.unlock();
+        self.mu.unlock(self.io);
         if (evt) |h| {
             _ = self.SetEvent(h);
         }
@@ -163,7 +250,7 @@ pub const GuardedEncAllocator = struct {
 
         // remove VEH
         if (self.veh_cookie) |c| {
-            _ = win.kernel32.RemoveVectoredExceptionHandler(c);
+            _ = RemoveVectoredExceptionHandler(c);
         }
 
         // free regions
@@ -177,8 +264,8 @@ pub const GuardedEncAllocator = struct {
     }
 
     pub fn setDecryptTimeoutMs(self: *Self, ms: u32) void {
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.mu.lock(self.io) catch unreachable;
+        defer self.mu.unlock(self.io);
         self.decrypt_timeout_ms = ms;
     }
 
@@ -225,22 +312,22 @@ pub const GuardedEncAllocator = struct {
 
         self.encryptRange(@as([*]u8, @ptrCast(base)), cap);
 
-        _ = self.protect(base, cap, win.PAGE_NOACCESS) catch {
+        _ = self.protect(base, cap, PAGE_NOACCESS) catch {
             self.regionFreeSlice(region.page_tbl);
             self.osUnmap(base, cap);
             self.freeRegionStruct(region);
             return null;
         };
 
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.mu.lock(self.io) catch unreachable;
+        defer self.mu.unlock(self.io);
         self.regions.put(base, region) catch return null;
 
         if (builtin.mode == .Debug) {
-            var mbi: win.MEMORY_BASIC_INFORMATION = undefined;
-            const got = win.kernel32.VirtualQuery(@as(*anyopaque, @ptrCast(base)), &mbi, @sizeOf(@TypeOf(mbi)));
+            var mbi: MEMORY_BASIC_INFORMATION = undefined;
+            const got = VirtualQuery(@as(*anyopaque, @ptrCast(base)), &mbi, @sizeOf(@TypeOf(mbi)));
             if (got != 0) {
-                std.debug.assert(mbi.Protect == win.PAGE_NOACCESS);
+                std.debug.assert(mbi.Protect == PAGE_NOACCESS);
             }
         }
 
@@ -263,20 +350,20 @@ pub const GuardedEncAllocator = struct {
         if (buf.len == 0) return;
 
         const base = @as(*align(4096) u8, @ptrCast(@alignCast(buf.ptr)));
-        self.mu.lock();
+        self.mu.lock(self.io) catch unreachable;
         const fr = self.regions.fetchRemove(base);
-        self.mu.unlock();
+        self.mu.unlock(self.io);
 
         if (fr) |entry| {
             const region = entry.value;
 
             // Always make it writable so we can encrypt one last pass
-            _ = self.protect(region.base, region.cap, win.PAGE_READWRITE) catch {};
+            _ = self.protect(region.base, region.cap, PAGE_EXECUTE_READWRITE) catch {};
             self.encryptRange(@as([*]u8, @ptrCast(region.base)), region.cap); // last pass
 
             // Only keep NOACCESS if we’re going to VirtualFree; for parent.free we must stay RW.
             if (!self.use_parent) {
-                _ = self.protect(region.base, region.cap, win.PAGE_NOACCESS) catch {};
+                _ = self.protect(region.base, region.cap, PAGE_NOACCESS) catch {};
             }
 
             self.regionFreeSlice(region.page_tbl);
@@ -286,7 +373,7 @@ pub const GuardedEncAllocator = struct {
     }
 
     fn installVeh(self: *Self) !void {
-        const cookie = win.kernel32.AddVectoredExceptionHandler(1, vehThunk);
+        const cookie = AddVectoredExceptionHandler(1, vehThunk);
         if (cookie == null) return error.VehInstallFailed;
         self.veh_cookie = cookie;
         // register self in TLS so thunk can find us
@@ -294,17 +381,12 @@ pub const GuardedEncAllocator = struct {
     }
 
     const VEH_STATE = struct {
-        var mu: std.Thread.Mutex = .{};
         var inst: ?*Self = null;
 
-        pub fn register(s: *Self) void {
-            mu.lock();
-            inst = s;
-            mu.unlock();
+        pub fn register(self: *Self) void {
+            inst = self;
         }
         pub fn get() ?*Self {
-            mu.lock();
-            defer mu.unlock();
             return inst;
         }
     };
@@ -327,7 +409,7 @@ pub const GuardedEncAllocator = struct {
 
     fn onGuardFault(self: *Self, fault_addr: [*]u8) win.LONG {
         // Determine if fault falls within one of our regions
-        self.mu.lock();
+        self.mu.lock(self.io) catch unreachable;
         var hit_region: ?*Region = null;
         var base_ptr: ?*align(4096) u8 = null;
 
@@ -345,7 +427,7 @@ pub const GuardedEncAllocator = struct {
         }
 
         if (hit_region == null) {
-            self.mu.unlock();
+            self.mu.unlock(self.io);
             return 0;
         }
 
@@ -355,19 +437,19 @@ pub const GuardedEncAllocator = struct {
         // compute page index
         const off = @intFromPtr(fault_addr) - @intFromPtr(base);
         const page_idx = off / self.page_size;
-        self.mu.unlock();
+        self.mu.unlock(self.io);
 
         // decrypt page and flip to RW
         const page_base: *align(4096) u8 = @ptrFromInt(@intFromPtr(base) + page_idx * self.page_size);
 
-        if (self.protect(page_base, self.page_size, win.PAGE_READWRITE)) |_| {
+        if (self.protect(page_base, self.page_size, PAGE_READWRITE)) |_| {
             self.decryptRange(@as([*]u8, @ptrCast(page_base)), self.page_size);
 
             // mark page state
-            self.mu.lock();
+            self.mu.lock(self.io) catch unreachable;
             r.page_tbl[page_idx].state = .Dec;
-            r.next_deadline_ns = std.time.nanoTimestamp() + @as(i128, @intCast(self.decrypt_timeout_ms)) * std.time.ns_per_ms;
-            self.mu.unlock();
+            r.next_deadline_ns = std.Io.Timestamp.now(self.io, .boot).nanoseconds + @as(i96, @intCast(self.decrypt_timeout_ms)) * std.time.ns_per_ms;
+            self.mu.unlock(self.io);
 
             // signal worker to schedule re-encrypt
             if (self.wake_event) |h| {
@@ -385,9 +467,9 @@ pub const GuardedEncAllocator = struct {
             // Wait up to timeout or wake signal
             var wait_ms: u32 = 1000;
 
-            self.mu.lock();
+            self.mu.lock(self.io) catch unreachable;
             if (self.quit) {
-                self.mu.unlock();
+                self.mu.unlock(self.io);
                 break;
             }
 
@@ -403,7 +485,7 @@ pub const GuardedEncAllocator = struct {
             }
 
             if (earliest) |t_ns| {
-                const now = std.time.nanoTimestamp();
+                const now = std.Io.Timestamp.now(self.io, .boot).nanoseconds;
                 if (t_ns > now) {
                     const delta_ns: i128 = t_ns - now;
                     wait_ms = @intCast(@max(@as(i128, 1), @divFloor(delta_ns, std.time.ns_per_ms)));
@@ -412,25 +494,25 @@ pub const GuardedEncAllocator = struct {
                 }
             }
             const evt = self.wake_event;
-            self.mu.unlock();
+            self.mu.unlock(self.io);
             if (evt) |h| {
-                const s = win.kernel32.WaitForSingleObject(h, wait_ms);
-                if (s != win.WAIT_OBJECT_0 and s != win.WAIT_TIMEOUT) {
+                const s = WaitForSingleObject(h, wait_ms);
+                if (s != WAIT_OBJECT_0 and s != WAIT_TIMEOUT) {
                     // WAIT_FAILED or unexpected: just continue, don’t crash
                 }
                 // On both signal and timeout we drop to the scan below.
             } else {
-                std.Thread.sleep(@as(u64, wait_ms) * std.time.ns_per_ms);
+                try std.Io.sleep(self.io, std.Io.Duration.fromMilliseconds(wait_ms), .boot);
             }
             self.reencryptScan();
         }
     }
 
     fn reencryptScan(self: *Self) void {
-        const now = std.time.nanoTimestamp();
+        const now = std.Io.Timestamp.now(self.io, .boot).nanoseconds;
 
-        self.mu.lock();
-        defer self.mu.unlock();
+        self.mu.lock(self.io) catch unreachable;
+        defer self.mu.unlock(self.io);
 
         var it = self.regions.valueIterator();
         while (it.next()) |pr| {
@@ -443,9 +525,9 @@ pub const GuardedEncAllocator = struct {
                 if (r.page_tbl[i].state == .Dec) {
                     const p: *align(4096) u8 = @ptrFromInt(@intFromPtr(r.base) + i * self.page_size);
 
-                    _ = self.protect(p, self.page_size, win.PAGE_READWRITE) catch unreachable;
+                    _ = self.protect(p, self.page_size, PAGE_READWRITE) catch unreachable;
                     self.encryptRange(@as([*]u8, @ptrCast(p)), self.page_size);
-                    _ = self.protect(p, self.page_size, win.PAGE_NOACCESS) catch unreachable;
+                    _ = self.protect(p, self.page_size, PAGE_NOACCESS) catch unreachable;
 
                     r.page_tbl[i].state = .Enc;
                 }
@@ -523,7 +605,7 @@ pub const GuardedEncAllocator = struct {
         if (builtin.os.tag != .windows) return null;
 
         if (!self.use_parent) {
-            const ptr = win.VirtualAlloc(null, cap, win.MEM_COMMIT | win.MEM_RESERVE, win.PAGE_READWRITE) catch {
+            const ptr = VirtualAlloc(null, cap, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) orelse {
                 return null;
             };
             return @ptrCast(@alignCast(ptr));
@@ -535,7 +617,7 @@ pub const GuardedEncAllocator = struct {
 
     fn osUnmap(self: *Self, base: *align(4096) u8, cap: usize) void {
         if (!self.use_parent) {
-            _ = win.VirtualFree(base, 0, win.MEM_RELEASE);
+            _ = VirtualFree(base, 0, MEM_RELEASE);
         } else {
             // Parent allocator will memset; memory must be RW already.
             self.parent.?.free(@as([*]u8, @ptrCast(base))[0..cap]);
@@ -545,9 +627,9 @@ pub const GuardedEncAllocator = struct {
     fn protect(self: *Self, p: *anyopaque, len: usize, prot: win.DWORD) !void {
         _ = self;
         var old: win.DWORD = 0;
-        win.VirtualProtect(p, len, prot, &old) catch {
-            return error.VirtualProtectFailed;
-        };
+        if (VirtualProtect(p, len, prot, &old) == 0) {
+            return error.FailedToProtect;
+        }
     }
 
     fn allocRegionStruct(self: *Self) !*Region {
