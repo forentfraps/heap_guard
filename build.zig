@@ -45,4 +45,5 @@ pub fn build(b: *std.Build) void {
     // / running the unit tests.
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
+    b.step("check", "zls step").dependOn(&run_lib_unit_tests.step);
 }

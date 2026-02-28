@@ -2,51 +2,8 @@ const std = @import("std");
 const builtin = @import("builtin");
 const mem = std.mem;
 const winz = std.os.windows;
-const win = @import("zigwin32").everything;
-// pub extern "kernel32" fn GetModuleHandleW(
-//     lpModuleName: [*:0]const win.WCHAR,
-// ) callconv(.winapi) ?win.HMODULE;
-// pub extern "kernel32" fn GetProcAddress(
-//     module: win.HMODULE,
-//     procName: [*:0]const u8,
-// ) callconv(.winapi) ?win.FARPROC;
-// extern "kernel32" fn AddVectoredExceptionHandler(
-//     First: std.os.windows.ULONG,
-//     Handler: ?*const fn (ExceptionInfo: *std.os.windows.EXCEPTION_POINTERS) callconv(.winapi) std.os.windows.LONG,
-// ) callconv(.winapi) ?std.os.windows.PVOID;
-// extern "kernel32" fn CreateEventExW(
-//     lpEventAttributes: ?*std.os.windows.SECURITY_ATTRIBUTES,
-//     lpName: ?std.os.windows.LPCWSTR,
-//     dwFlags: std.os.windows.DWORD,
-//     dwDesiredAccess: std.os.windows.DWORD,
-// ) callconv(.winapi) ?std.os.windows.HANDLE;
-// extern "kernel32" fn VirtualProtect(
-//     lpAddress: std.os.windows.LPVOID,
-//     dwSize: std.os.windows.SIZE_T,
-//     flNewProtect: std.os.windows.DWORD,
-//     lpflOldProtect: *std.os.windows.DWORD,
-// ) callconv(.winapi) std.os.windows.BOOL;
-// extern "kernel32" fn VirtualFree(
-//     lpAddress: std.os.windows.LPVOID,
-//     dwSize: std.os.windows.SIZE_T,
-//     dwFreeType: std.os.windows.DWORD,
-// ) callconv(.winapi) std.os.windows.BOOL;
-// extern "kernel32" fn VirtualAlloc(
-//     lpAddress: ?std.os.windows.LPVOID,
-//     dwSize: std.os.windows.SIZE_T,
-//     flAllocationType: std.os.windows.DWORD,
-//     flProtect: std.os.windows.DWORD,
-// ) callconv(.winapi) ?std.os.windows.LPVOID;
-// extern "kernel32" fn Sleep(
-//     dwMilliseconds: std.os.windows.DWORD,
-// ) callconv(.winapi) void;
-// extern "kernel32" fn RemoveVectoredExceptionHandler(
-//     Handle: std.os.windows.PVOID,
-// ) callconv(.winapi) std.os.windows.ULONG;
-// extern "kernel32" fn WaitForSingleObject(
-//     hHandle: std.os.windows.HANDLE,
-//     dwMilliseconds: std.os.windows.DWORD,
-// ) callconv(.winapi) std.os.windows.DWORD;
+const win = @import("zigwin32");
+
 const WAIT_OBJECT_0: std.os.windows.DWORD = 0x00000000;
 const WAIT_TIMEOUT: std.os.windows.DWORD = 0x00000102;
 const GENERIC_WRITE: u32 = 0x40000000;
@@ -95,7 +52,7 @@ const W = std.unicode.utf8ToUtf16LeStringLiteral;
 const Aes256 = std.crypto.core.aes.Aes256;
 const AesEnc = std.crypto.core.aes.AesEncryptCtx(Aes256);
 
-const tSetEvent = *const fn (win.HANDLE) callconv(.c) win.BOOL;
+const tSetEvent = *const fn (win.foundation.HANDLE) callconv(.c) u32;
 var pSetEvent: ?tSetEvent = null;
 
 pub const GuardedEncAllocator = struct {
@@ -121,7 +78,7 @@ pub const GuardedEncAllocator = struct {
 
     // async helper
     recrypt_thread: ?std.Thread = null,
-    wake_event: ?win.HANDLE = null,
+    wake_event: ?win.foundation.HANDLE = null,
     quit: bool = false,
 
     // Windows stuff
@@ -183,8 +140,11 @@ pub const GuardedEncAllocator = struct {
     }
     pub fn init(allocator: std.mem.Allocator, io: std.Io, use_parent: bool, parent_opt: ?std.mem.Allocator) !*Self {
         if (pSetEvent == null) {
-            const kernel32: winz.HINSTANCE = win.GetModuleHandleW(W("kernel32.dll")) orelse unreachable;
-            const fSetEvent: tSetEvent = @ptrCast(win.GetProcAddress(kernel32, "SetEvent") orelse unreachable);
+            const kernel32: winz.HINSTANCE = win.system.library_loader.GetModuleHandleW(W("kernel32.dll")) orelse unreachable;
+            const fSetEvent: tSetEvent = @ptrCast(win.system.library_loader.GetProcAddress(
+                kernel32,
+                "SetEvent",
+            ) orelse unreachable);
             pSetEvent = fSetEvent;
         }
 
@@ -229,7 +189,7 @@ pub const GuardedEncAllocator = struct {
 
         try self.installVeh();
 
-        self.wake_event = win.CreateEventExW(
+        self.wake_event = win.system.threading.CreateEventExW(
             null,
             null,
             .{},
@@ -252,11 +212,11 @@ pub const GuardedEncAllocator = struct {
             _ = self.SetEvent(h);
         }
         if (self.recrypt_thread) |t| t.join();
-        if (evt) |h| _ = win.CloseHandle(h);
+        if (evt) |h| _ = win.foundation.CloseHandle(h);
 
         // remove VEH
         if (self.veh_cookie) |c| {
-            _ = win.RemoveVectoredExceptionHandler(c);
+            _ = win.system.diagnostics.debug.RemoveVectoredExceptionHandler(c);
         }
 
         // free regions
@@ -379,7 +339,10 @@ pub const GuardedEncAllocator = struct {
     }
 
     fn installVeh(self: *Self) !void {
-        const cookie = win.AddVectoredExceptionHandler(1, vehThunk);
+        const cookie = win.system.diagnostics.debug.AddVectoredExceptionHandler(
+            1,
+            vehThunk,
+        );
         if (cookie == null) return error.VehInstallFailed;
         self.veh_cookie = cookie;
         // register self in TLS so thunk can find us
@@ -397,13 +360,15 @@ pub const GuardedEncAllocator = struct {
         }
     };
 
-    fn vehThunk(rec: ?*win.EXCEPTION_POINTERS) callconv(.c) winz.LONG {
+    fn vehThunk(
+        rec: ?*win.system.diagnostics.debug.EXCEPTION_POINTERS,
+    ) callconv(.c) winz.LONG {
         const opt = VEH_STATE.get();
         if (opt == null) return 0;
 
         var self = opt.?;
         const er = rec.?.ExceptionRecord.?.*;
-        if (er.ExceptionCode != win.EXCEPTION_ACCESS_VIOLATION) {
+        if (er.ExceptionCode != win.foundation.EXCEPTION_ACCESS_VIOLATION) {
             return 0;
         }
 
@@ -502,7 +467,10 @@ pub const GuardedEncAllocator = struct {
             const evt = self.wake_event;
             self.mu.unlock(self.io);
             if (evt) |h| {
-                const s = @intFromEnum(win.WaitForSingleObject(h, wait_ms));
+                const s = @intFromEnum(win.system.threading.WaitForSingleObject(
+                    h,
+                    wait_ms,
+                ));
                 if (s != WAIT_OBJECT_0 and s != WAIT_TIMEOUT) {
                     // WAIT_FAILED or unexpected: just continue, don’t crash
                 }
@@ -611,7 +579,7 @@ pub const GuardedEncAllocator = struct {
         if (builtin.os.tag != .windows) return null;
 
         if (!self.use_parent) {
-            const ptr = win.VirtualAlloc(
+            const ptr = win.system.memory.VirtualAlloc(
                 null,
                 cap,
                 .{ .COMMIT = 1, .RESERVE = 1 },
@@ -628,7 +596,7 @@ pub const GuardedEncAllocator = struct {
 
     fn osUnmap(self: *Self, base: *align(4096) u8, cap: usize) void {
         if (!self.use_parent) {
-            _ = win.VirtualFree(base, 0, .RELEASE);
+            _ = win.system.memory.VirtualFree(base, 0, .RELEASE);
         } else {
             // Parent allocator will memset; memory must be RW already.
             self.parent.?.free(@as([*]u8, @ptrCast(base))[0..cap]);
@@ -637,8 +605,13 @@ pub const GuardedEncAllocator = struct {
 
     fn protect(self: *Self, p: *anyopaque, len: usize, prot: winz.DWORD) !void {
         _ = self;
-        var old: win.PAGE_PROTECTION_FLAGS = undefined;
-        if (win.VirtualProtect(p, len, @bitCast(prot), &old) == 0) {
+        var old: win.system.memory.PAGE_PROTECTION_FLAGS = undefined;
+        if (win.system.memory.VirtualProtect(
+            p,
+            len,
+            @bitCast(prot),
+            &old,
+        ) == 0) {
             return error.FailedToProtect;
         }
     }
